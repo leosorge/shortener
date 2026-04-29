@@ -2,9 +2,9 @@
 shortener/app.py
 ────────────────
 Comprime un articolo web in 3 step prima di inviarlo a un LLM a pagamento:
-  Step 1 — TF-IDF  : rimuove i paragrafi meno rilevanti
-  Step 2 — TextRank: estrae le frasi chiave con ranking estrattivo
-  Step 3 — BART    : sintesi astrattiva con map-reduce su chunk
+  Step 1 — TF-IDF   : rimuove i paragrafi meno rilevanti (locale, gratuito)
+  Step 2 — TextRank : estrae le frasi chiave con ranking estrattivo (locale, gratuito)
+  Step 3 — LLM      : sintesi astrattiva finale via llm_client
 """
 
 import re
@@ -15,67 +15,40 @@ import requests
 import streamlit as st
 from bs4 import BeautifulSoup
 from sklearn.feature_extraction.text import TfidfVectorizer
+from llm_client import render_provider_selector, generate
 
 # ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(page_title="Shortener", page_icon="✂️", layout="centered")
+render_provider_selector()
 st.title("✂️ Shortener")
 st.caption("Comprime un articolo web in 3 step prima di inviarlo all'LLM.")
 
 
-# ── Caricamento modelli (cached) ──────────────────────────────────────────────
+# ── Caricamento modelli NLP (cached) ──────────────────────────────────────────
 @st.cache_resource(show_spinner="Caricamento modelli NLP (solo al primo avvio)…")
-def load_models():
+def load_nlp():
     import spacy
     import pytextrank  # noqa: F401 — registra la pipe "textrank"
-    from transformers import pipeline as hf_pipeline
-
     nlp = spacy.load("en_core_web_sm")
     nlp.add_pipe("textrank")
-    summarizer = hf_pipeline(
-        "summarization",
-        model="facebook/bart-large-cnn",
-        device=-1,
-    )
-    return nlp, summarizer
+    return nlp
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 def _slug_from_url(url: str) -> str:
-    """Restituisce il nome della pagina (ultimo segmento del path) senza dominio."""
     path = urlparse(url).path.rstrip("/")
     slug = path.split("/")[-1] if path else "output"
-    slug = re.sub(r"[^\w-]", "", slug)          # rimuove caratteri speciali
+    slug = re.sub(r"[^\w-]", "", slug)
     return slug or "output"
 
 
 def _filename_from_url(url: str) -> str:
-    """Primi 6 caratteri della slug + .txt"""
-    slug = _slug_from_url(url)
-    return slug[:6].rstrip("-") + ".txt"
-
-
-def _chunk_text(text: str, max_chars: int = 3000) -> list[str]:
-    """Divide il testo in chunk rispettando i confini delle frasi."""
-    sentences = text.split(". ")
-    chunks, current = [], ""
-    for sent in sentences:
-        if len(current) + len(sent) < max_chars:
-            current += sent + ". "
-        else:
-            if current:
-                chunks.append(current.strip())
-            current = sent + ". "
-    if current:
-        chunks.append(current.strip())
-    return chunks
+    return _slug_from_url(url)[:6].rstrip("-") + ".txt"
 
 
 # ── Pipeline ──────────────────────────────────────────────────────────────────
 def pipeline_compressione(url: str) -> tuple[str, str]:
-    """
-    Ritorna (testo_compresso, nome_file).
-    """
-    nlp, summarizer = load_models()
+    nlp = load_nlp()
 
     # ── STEP 0: scraping ──────────────────────────────────────────────────────
     with st.status("Step 0 — Scraping…"):
@@ -102,32 +75,21 @@ def pipeline_compressione(url: str) -> tuple[str, str]:
 
     # ── STEP 2: TextRank ─────────────────────────────────────────────────────
     with st.status("Step 2 — TextRank (estrazione frasi chiave)…"):
-        doc = nlp(text_filtered[:100_000])  # limite spacy
+        doc = nlp(text_filtered[:100_000])
         ranked = [sent.text for sent in doc._.textrank.summary(limit_sentences=30)]
         text_ranked = " ".join(ranked)
         reduction_2 = (1 - len(text_ranked) / len(full_text)) * 100
-        st.write(f"{len(ranked)} frasi estratte — riduzione **{reduction_2:.0f}%**")
+        st.write(f"{len(ranked)} frasi estratte — riduzione **{reduction_2:.0f}%** — "
+                 f"**{len(text_ranked):,}** caratteri inviati all'LLM")
 
-    # ── STEP 3: BART map-reduce ───────────────────────────────────────────────
-    with st.status("Step 3 — Sintesi astrattiva BART…"):
-        chunks = _chunk_text(text_ranked, max_chars=3000)
-        st.write(f"Testo diviso in **{len(chunks)}** chunk…")
-
-        partials = []
-        prog = st.progress(0)
-        for i, chunk in enumerate(chunks):
-            result = summarizer(chunk, max_length=200, min_length=80, do_sample=False)
-            partials.append(result[0]["summary_text"])
-            prog.progress((i + 1) / len(chunks))
-
-        combined = " ".join(partials)
-        if len(combined) > 3000:
-            st.write("Sintesi delle sintesi parziali…")
-            result = summarizer(combined[:3000], max_length=300, min_length=100, do_sample=False)
-            final = result[0]["summary_text"]
-        else:
-            final = combined
-
+    # ── STEP 3: sintesi astrattiva via LLM ───────────────────────────────────
+    with st.status("Step 3 — Sintesi astrattiva (LLM)…"):
+        final = generate(
+            prompt=f"Riassumi questo testo in modo chiaro e completo:\n\n{text_ranked}",
+            system="Sei un assistente esperto nella sintesi di articoli. Rispondi in italiano.",
+            max_tokens=2048,
+            temperature=0.3,
+        )
         reduction_final = (1 - len(final) / len(full_text)) * 100
         st.write(f"Testo finale: **{len(final):,}** caratteri — riduzione totale **{reduction_final:.0f}%**")
 
