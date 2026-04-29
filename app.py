@@ -51,7 +51,7 @@ def pipeline_compressione(url: str) -> tuple[str, str]:
     nlp = load_nlp()
 
     # ── STEP 0: scraping ──────────────────────────────────────────────────────
-    with st.status("Step 0 — Scraping…"):
+    with st.status("Step 0 — Scraping…", expanded=True):
         resp = requests.get(url, timeout=20, headers={"User-Agent": "Mozilla/5.0"})
         resp.raise_for_status()
         soup = BeautifulSoup(resp.text, "html.parser")
@@ -63,7 +63,7 @@ def pipeline_compressione(url: str) -> tuple[str, str]:
         st.write(f"Testo originale: **{len(full_text):,}** caratteri — **{len(paragraphs)}** paragrafi")
 
     # ── STEP 1: TF-IDF ───────────────────────────────────────────────────────
-    with st.status("Step 1 — TF-IDF (rimozione paragrafi irrilevanti)…"):
+    with st.status("Step 1 — TF-IDF (rimozione paragrafi irrilevanti)…", expanded=True):
         vectorizer = TfidfVectorizer(stop_words="english")
         tfidf_matrix = vectorizer.fit_transform(paragraphs)
         sums = np.asarray(tfidf_matrix.sum(axis=1)).flatten()
@@ -74,7 +74,7 @@ def pipeline_compressione(url: str) -> tuple[str, str]:
         st.write(f"{len(filtered)} paragrafi mantenuti — riduzione **{reduction_1:.0f}%**")
 
     # ── STEP 2: TextRank ─────────────────────────────────────────────────────
-    with st.status("Step 2 — TextRank (estrazione frasi chiave)…"):
+    with st.status("Step 2 — TextRank (estrazione frasi chiave)…", expanded=True):
         doc = nlp(text_filtered[:100_000])
         ranked = [sent.text for sent in doc._.textrank.summary(limit_sentences=30)]
         text_ranked = " ".join(ranked)
@@ -83,7 +83,7 @@ def pipeline_compressione(url: str) -> tuple[str, str]:
                  f"**{len(text_ranked):,}** caratteri inviati all'LLM")
 
     # ── STEP 3: sintesi astrattiva via LLM ───────────────────────────────────
-    with st.status("Step 3 — Sintesi astrattiva (LLM)…"):
+    with st.status("Step 3 — Sintesi astrattiva (LLM)…", expanded=True):
         final = generate(
             prompt=f"Riassumi questo testo in modo chiaro e completo:\n\n{text_ranked}",
             system="Sei un assistente esperto nella sintesi di articoli. Rispondi in italiano.",
@@ -105,19 +105,21 @@ url = st.text_input(
 if st.button("✂️ Comprimi", type="primary", disabled=not url):
     try:
         testo, fname = pipeline_compressione(url.strip())
-
-        st.divider()
-        st.subheader("📄 Testo compresso (pronto per l'LLM)")
-        st.text_area("", value=testo, height=300, label_visibility="collapsed")
-
-        st.download_button(
-            label=f"⬇️ Scarica {fname}",
-            data=testo,
-            file_name=fname,
-            mime="text/plain",
-        )
-
+        st.session_state["risultato"] = testo
+        st.session_state["fname"] = fname
     except requests.exceptions.RequestException as e:
         st.error(f"Errore di rete: {e}")
     except Exception as e:
         st.exception(e)
+
+# Mostra il risultato persistente (sopravvive ai rerun)
+if "risultato" in st.session_state:
+    st.divider()
+    st.subheader("📄 Testo compresso (pronto per l'LLM)")
+    st.text_area("Testo compresso", value=st.session_state["risultato"], height=300, label_visibility="collapsed")
+    st.download_button(
+        label=f"⬇️ Scarica {st.session_state['fname']}",
+        data=st.session_state["risultato"],
+        file_name=st.session_state["fname"],
+        mime="text/plain",
+    )
